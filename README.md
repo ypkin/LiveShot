@@ -49,7 +49,7 @@ LiveShot 的核心基于 **Express.js** (Web 服务) 和 **Puppeteer** (浏览�
 
 ```bash
 # 下载并运行安装脚本
-wget -O liveshot.sh https://raw.githubusercontent.com/ypkin/LiveShot/refs/heads/main/liveshot.sh
+wget -O liveshot.sh https://raw.githubusercontent.com/ypkin/LiveShot/refs/heads/main/liveshot.sh && chmod +x liveshot.sh && ./liveshot.sh
 ```
 
 进入菜单后，选择 **`1. 安装/更新代码`** 即可自动完成环境配置。
