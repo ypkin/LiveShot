@@ -33,7 +33,7 @@
 
     ```bash
     # 下载脚本 (假设您已将脚本保存为 liveshot.sh)
-    wget -O liveshot.sh https://raw.githubusercontent.com/您的用户名/仓库名/main/liveshot.sh
+    wget -O liveshot.sh https://raw.githubusercontent.com/ypkin/LiveShot/refs/heads/main/liveshot.sh
 
     # 或者直接在服务器新建文件粘贴代码
     nano liveshot
