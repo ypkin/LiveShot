@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-# LiveShot - Puppeteer 截图与直播服务 (安全版 v3.2 - 高清)
+# LiveShot - Puppeteer 截图与直播服务 (安全版 v3.3 - 性能修复版)
 # =========================================================
 
 # 颜色定义
@@ -97,7 +97,7 @@ get_status_info() {
 
 # 1. 安装服务
 install_service() {
-    echo -e "${SKYBLUE}>>> 正在安装 LiveShot (安全版 - 高清)...${NC}"
+    echo -e "${SKYBLUE}>>> 正在安装 LiveShot (性能修复版)...${NC}"
     
     # 环境准备
     apt update -y >/dev/null 2>&1
@@ -140,22 +140,23 @@ install_service() {
     fi
     echo "{\"token\": \"$NEW_TOKEN\"}" > $CONFIG_FILE
 
-    # 写入核心代码 (含鉴权逻辑 + 高清设置)
+    # 写入核心代码 (含鉴权逻辑 + 性能优化)
     cat << 'EOF' > index.js
 const express = require('express');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const app = express();
-const port = 3000;
+const port = 6000;
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 const TOKEN = config.token;
 
 let browser;
 async function initBrowser() {
     if (browser && browser.isConnected()) return;
+    // 修复点: 移除 --single-process 以提高稳定性
     browser = await puppeteer.launch({
         headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run', '--single-process']
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run']
     });
 }
 initBrowser();
@@ -183,7 +184,7 @@ app.get('/screenshot', authMiddleware, async (req, res) => {
         page = await browser.newPage();
         await page.setViewport({ width: parseInt(width)||1920, height: parseInt(height)||1080 });
         await page.goto(url.startsWith('http')?url:`http://${url}`, { waitUntil: 'networkidle2', timeout: 30000 });
-        // 提高静态截图质量到 95
+        // 静态截图保持高质量
         const img = await page.screenshot({ type: 'jpeg', quality: 95, fullPage: full==='true' });
         res.set('Content-Type', 'image/jpeg');
         res.send(img);
@@ -205,12 +206,12 @@ app.get('/live', authMiddleware, async (req, res) => {
         req.on('close', () => { isClosed = true; });
         while (!isClosed) {
             if (page.isClosed()) break;
-            // 提高直播截图质量到 90
             const buffer = await page.screenshot({ type: 'jpeg', quality: 90 });
             res.write(`--frame\r\nContent-Type: image/jpeg\r\n\r\n`);
             res.write(buffer);
             res.write(`\r\n`);
-            await new Promise(r => setTimeout(r, 200));
+            // 修复点: 增加延时到 300ms 降低 CPU 负载
+            await new Promise(r => setTimeout(r, 300));
         }
     } catch (e) { if (!isClosed) res.end(); } 
     finally { if (page && !page.isClosed()) await page.close(); }
@@ -220,7 +221,8 @@ EOF
 
     npm install -g pm2 >/dev/null 2>&1
     pm2 delete $APP_NAME 2>/dev/null
-    pm2 start index.js --name "$APP_NAME" --max-memory-restart 500M
+    # 修复点: 增加内存上限到 1500M
+    pm2 start index.js --name "$APP_NAME" --max-memory-restart 1500M
     pm2 save
     pm2 startup | bash &>/dev/null
     create_shortcut
@@ -266,7 +268,7 @@ show_menu() {
         get_status_info
         clear
         echo -e "${SKYBLUE}====================================================${NC}"
-        echo -e "${SKYBLUE}      LiveShot 安全版 v3.2 (快捷键: $SHORTCUT_NAME)        ${NC}"
+        echo -e "${SKYBLUE}   LiveShot 安全版 v3.3 (修复版) (快捷键: $SHORTCUT_NAME)    ${NC}"
         echo -e "${SKYBLUE}====================================================${NC}"
         echo -e " 状态: $STATUS_COLOR"
         echo -e " 时间: ${PURPLE}$UPTIME_TEXT${NC}"
@@ -276,7 +278,7 @@ show_menu() {
         echo -e " ${GREY}截图: https://域名/screenshot?url=...&token=${CURRENT_TOKEN}${NC}"
         echo -e " ${GREY}直播: https://域名/live?url=...&token=${CURRENT_TOKEN}${NC}"
         echo -e "${SKYBLUE}----------------------------------------------------${NC}"
-        echo -e " ${GREEN}1.${NC} 安装/更新代码 (应用高清设置)"
+        echo -e " ${GREEN}1.${NC} 安装/更新代码 (应用修复补丁)"
         echo -e " ${GREEN}2.${NC} 修改/重置 Token"
         echo -e " ${GREEN}3.${NC} 重启服务"
         echo -e " ${GREEN}4.${NC} 查看日志"
