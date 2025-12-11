@@ -1,179 +1,85 @@
+这是一个更新后的精简版 `README.md`，加入了 Nginx 安全配置部分。
 
 -----
 
-# 📸 LiveShot - 网页实时截图与直播 API
+# LiveShot (v4.1) 📸
 
-> **Turn your VPS into a secure, real-time web monitoring API.**
-> 将您的 VPS 瞬间变身为强大的网页截图与直播服务器。
+**轻量级 Puppeteer 截图与网页直播 API 服务**
 
-**LiveShot** 是一个基于 **Node.js** 和 **Puppeteer** (Headless Chrome) 的轻量级服务。它允许你通过简单的 API 调用，获取任何网页的高清截图，甚至是以 **MJPEG 视频流** 的形式实时“直播”网页的变化。
+专为 Linux VPS 设计的高性能网页渲染工具。支持通过 API 获取网页截图或实时 MJPEG 直播流，**支持 Nginx 反代隐藏 Token**。
 
-特别适合用于 **服务器探针监控 (Server Status)**、**GitHub Profile 动态展示**、**自动化报表生成** 或 **网页变动监控**。
+## 🚀 快速部署
 
------
-
-## ✨ 功能特性 (Features)
-
-  * **⚡ 毫秒级静态截图**: 支持自定义分辨率、长截图 (`fullPage`)。
-  * **🎥 实时网页直播 (Live Stream)**: 利用 MJPEG 技术，将网页动态（如时钟、K线图、进度条）转为视频流，无需插件直接在浏览器播放。
-  * **🛡️ 安全鉴权机制 (Token)**: 内置 API Token 验证，防止接口被滥用。
-  * **🔒 SSRF 防御**: 自动拦截对内网 IP (127.0.0.1, 192.168.x) 的请求，保护服务器安全。
-  * **🛠️ 交互式管理脚本**: 提供 `ss` 快捷命令，支持一键安装、升级、重置 Token、查看实时日志。
-  * **📉 资源智能优化**: 自动管理 Chrome 实例，包含 Swap 内存保护机制，防止小内存 VPS 崩溃。
-
------
-
-## 🧠 技术原理 (Architecture)
-
-LiveShot 的核心基于 **Express.js** (Web 服务) 和 **Puppeteer** (浏览器控制)。
-
-1.  **静态截图 (`/screenshot`)**:
-      * 用户发起请求 -\> 服务器启动无头浏览器 -\> 加载目标 URL -\> 渲染页面 -\> 截图 -\> 输出 JPEG 图片流 -\> 释放资源。
-2.  **实时直播 (`/live`)**:
-      * 利用 **MJPEG (Motion JPEG)** 协议及 `multipart/x-mixed-replace` 响应头。
-      * 服务器与客户端建立 HTTP 长连接，在后台循环对页面进行截图，并连续不断地将图片帧推送到前端。
-      * 这种方式兼容性极佳，可以在任何支持 `<img>` 标签的地方（包括 GitHub README）播放“视频”。
-
------
-
-## 🚀 部署指南 (Deployment)
-
-### 环境要求
-
-  * **系统**: Debian / Ubuntu (推荐 Debian 10+)
-  * **内存**: 建议 ≥ 1GB (脚本会自动检测并创建 2GB Swap 虚拟内存)
-
-### 📥 一键安装
-
-使用 root 用户在 VPS 上执行以下命令：
+一键安装脚本（支持 Debian/Ubuntu）：
 
 ```bash
-# 下载并运行安装脚本
 wget -O liveshot.sh https://raw.githubusercontent.com/ypkin/LiveShot/refs/heads/main/liveshot.sh && chmod +x liveshot.sh && ./liveshot.sh
 ```
 
-进入菜单后，选择 **`1. 安装/更新代码`** 即可自动完成环境配置。
+*安装后输入 `lvs` 呼出管理菜单。*
 
-### ⌨️ 管理菜单
+## 🛡️ Nginx 安全隐蔽配置 (推荐)
 
-安装完成后，您可以随时在终端输入快捷键 **`ss`** 唤出管理面板：
+通过 Nginx 反向代理将 `Token` 和 `目标URL` 写死在配置中，生成**不含敏感参数**的公开链接。
 
-```bash
-ss
-```
+**公开访问地址示例：**
 
-面板支持功能：
+  * **直播流**: `https://your-domain.com/gh-live` (适合嵌入网页/OBS)
+  * **静态图**: `https://your-domain.com/gh-shot` (适合 GitHub README)
 
-  * 查看服务运行状态 (CPU/Uptime)
-  * 查看/重置 API Token
-  * 查看实时请求日志
-  * 重启/停止/卸载服务
+**Nginx 配置示例 (`server` 块内)：**
 
------
+```nginx
+server {
+    listen 80;
+    listen 443 ssl;
+    server_name your-domain.com; # 修改为你的域名
+    
+    # SSL 证书配置...
+    
+    # 1. 安全直播路由 (隐藏 Token)
+    location = /gh-live {
+        # ▼ 在此处修改目标 URL 和 Token
+        set $args "url=https://time.is&token=YOUR_TOKEN";
+        
+        proxy_pass http://127.0.0.1:6000/live; # 假设后端在本地 6000 端口
+        proxy_set_header Host $host;
+        
+        # 关键：关闭缓冲以支持流媒体
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+    }
 
-## 🔌 API 文档 (Usage)
+    # 2. 安全截图路由 (隐藏 Token)
+    location = /gh-shot {
+        # ▼ 在此处修改目标 URL、Token 和分辨率
+        set $args "url=https://google.com&token=YOUR_TOKEN&width=1280&height=720";
+        
+        proxy_pass http://127.0.0.1:6000/screenshot;
+        proxy_set_header Host $host;
+    }
 
-假设您的服务器 IP 为 `1.2.3.4`，端口为 `3000` (建议配置反向代理使用域名)。
-
-> **⚠️ 注意**: 所有请求必须包含 `token` 参数，否则返回 403 Forbidden。
-
-### 1\. 获取静态截图
-
-**Endpoint:** `GET /screenshot`
-
-| 参数 | 类型 | 必填 | 默认值 | 描述 |
-| :--- | :--- | :--- | :--- | :--- |
-| `url` | string | **是** | - | 目标网页地址 (需包含 http/https) |
-| `token` | string | **是** | - | 您的 API 密钥 |
-| `width` | int | 否 | 1920 | 视窗宽度 |
-| `height` | int | 否 | 1080 | 视窗高度 |
-| `full` | bool | 否 | false | 是否截取完整长图 (`true`/`false`) |
-
-**示例:**
-
-```bash
-https://your-domain.com/screenshot?url=https://www.google.com&token=YOUR_TOKEN&width=1280
-```
-
-### 2\. 获取实时直播流
-
-**Endpoint:** `GET /live`
-
-| 参数 | 类型 | 必填 | 默认值 | 描述 |
-| :--- | :--- | :--- | :--- | :--- |
-| `url` | string | **是** | - | 目标网页地址 |
-| `token` | string | **是** | - | 您的 API 密钥 |
-| `width` | int | 否 | 1280 | 视窗宽度 |
-| `height` | int | 否 | 720 | 视窗高度 |
-
-**示例:**
-
-```bash
-https://your-domain.com/live?url=https://time.is&token=YOUR_TOKEN
-```
-
------
-
-## 🎨 集成示例 (Integration)
-
-### 在 GitHub README 中使用
-
-> **注意**: GitHub 强制使用 HTTPS。如果您的 API 是 HTTP，图片将无法显示。请使用 Caddy/Nginx 配置反向代理 SSL。
-
-**Markdown 代码:**
-
-```markdown
-![Server Status](https://your-domain.com/live?url=https://status.your-server.com&token=YOUR_TOKEN)
-```
-
-### 在 HTML / 个人网站中使用
-
-**HTML 代码:**
-
-```html
-<div style="border: 2px solid #333; border-radius: 8px; overflow: hidden;">
-    <img src="https://your-domain.com/live?url=https://time.is&token=YOUR_TOKEN" width="100%" alt="Live Stream" />
-</div>
-```
-
------
-
-## ⚙️ 进阶配置: HTTPS 反向代理
-
-为了在 GitHub 上正常显示，建议使用 **Caddy** 进行反向代理并自动申请 SSL 证书。
-
-**Caddyfile 示例:**
-
-```caddy
-shot.your-domain.com {
-    reverse_proxy localhost:3000
-    encode gzip
+    # 3. 原生接口 (需要手动带参数)
+    location / {
+        proxy_pass http://127.0.0.1:6000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
 }
 ```
 
-配置完成后，即可使用 `https://shot.your-domain.com/...` 进行调用。
+## 🔗 原生 API 文档
 
------
+如果不使用 Nginx 隐藏，可直接通过端口访问：
 
-## ❓ 常见问题 (FAQ)
+| 功能 | 路径 | 参数 | 示例 |
+| :--- | :--- | :--- | :--- |
+| **截图** | `/screenshot` | `url`, `token`, `full` | `http://ip:6000/screenshot?url=...&token=...` |
+| **直播** | `/live` | `url`, `token` | `http://ip:6000/live?url=...&token=...` |
 
-**Q: 为什么服务运行一段时间后自动停止？**
-A: 通常是因为 VPS 内存不足。请确保您使用了脚本内置的 Swap 创建功能（脚本会自动判断）。如果问题依旧，请在 PM2 中限制内存重启阈值。
+## ✨ 特性
 
-**Q: 中文网页显示乱码或方块？**
-A: 脚本已自动安装 `fonts-noto-cjk` 字体包。如果仍乱码，尝试重启服务：`ss` -\> `3. 重启服务`。
-
-**Q: Token 泄露了怎么办？**
-A: 运行 `ss` 命令，选择 **`2. 修改/重置 Token`**，系统会立即生成新 Token 并重启服务，旧 Token 将失效。
-
------
-
-## 📄 License
-
-MIT License
-
-
------
-
-
-MIT License
+  * **极低占用**: 零轮询开销，PM2 智能内存守护。
+  * **安全鉴权**: Token 验证 + 自动屏蔽内网 IP 请求。
+  * **快捷管理**: 提供 `lvs` 终端指令，支持重置 Token 和 彻底卸载。
