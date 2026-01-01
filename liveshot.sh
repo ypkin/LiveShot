@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# LiveShot v4.2 - 稳定优化版 (Anti-OOM & Concurrency Limit)
-# 功能：Puppeteer 截图/直播 | 特性：并发限制、内存保护、防崩溃
+# LiveShot v4.3 - 智能内存管理版 (Auto-Sleep Strategy)
+# 功能：Puppeteer 截图/直播 | 特性：空闲自动释放内存、并发限制
 # =========================================================
 
 # --- 配置区域 ---
@@ -58,6 +58,7 @@ get_status_info() {
     STATUS_COLOR="${RED}Stopped${NC}"
     UPTIME_TEXT="0s"
     LAST_LOG="无记录"
+    MEM_USAGE="0MB"
     
     if [ -f "$CONFIG_FILE" ]; then
         CURRENT_TOKEN=$(grep -oP '(?<="token": ")[^"]*' "$CONFIG_FILE")
@@ -70,6 +71,7 @@ get_status_info() {
             local pm2_out=$(pm2 jlist)
             local raw_status=$(echo "$pm2_out" | grep -oP "\"name\":\"$APP_NAME\".*?\"status\":\"\K[^\"]+")
             local uptime_ts=$(echo "$pm2_out" | grep -oP "\"name\":\"$APP_NAME\".*?\"pm_uptime\":\K[0-9]+")
+            local mem_bytes=$(echo "$pm2_out" | grep -oP "\"name\":\"$APP_NAME\".*?\"memory\":\K[0-9]+")
 
             if [ "$raw_status" == "online" ]; then
                 STATUS_COLOR="${GREEN}Running${NC}"
@@ -77,11 +79,16 @@ get_status_info() {
                 if [[ "$now" == *N ]]; then now=$(($(date +%s)*1000)); fi
                 local diff=$(( (now - uptime_ts) / 1000 ))
                 UPTIME_TEXT=$(format_uptime $diff)
+                
+                # 计算内存
+                if [ ! -z "$mem_bytes" ]; then
+                    MEM_USAGE=$(awk "BEGIN {printf \"%.1fMB\", $mem_bytes/1024/1024}")
+                fi
             else
                 STATUS_COLOR="${RED}$raw_status${NC}"
             fi
 
-            local log=$(pm2 logs "$APP_NAME" --lines 10 --nostream --raw 2>/dev/null | grep -E "\[Shot\]|\[Live\]" | tail -n 1)
+            local log=$(pm2 logs "$APP_NAME" --lines 10 --nostream --raw 2>/dev/null | grep -E "\[Shot\]|\[Live\]|\[System\]" | tail -n 1)
             [ ! -z "$log" ] && LAST_LOG=$(echo "$log" | cut -c 1-60)
         fi
     fi
@@ -89,7 +96,7 @@ get_status_info() {
 
 # 1. 安装服务
 install_service() {
-    echo -e "${BLUE}>>> 开始部署 LiveShot (v4.2 稳定版)...${NC}"
+    echo -e "${BLUE}>>> 开始部署 LiveShot v4.3 (智能内存优化版)...${NC}"
     
     apt-get update -y
     apt-get install -y --no-install-recommends curl wget gnupg2 ca-certificates lsb-release
@@ -134,7 +141,7 @@ install_service() {
         echo "{\"token\": \"$TOKEN\"}" > "$CONFIG_FILE"
     fi
 
-    # --- 写入优化后的 Node 代码 (包含并发控制) ---
+    # --- 写入优化后的 Node 代码 (包含空闲销毁逻辑) ---
     cat << 'EOF' > index.js
 const express = require('express');
 const puppeteer = require('puppeteer');
@@ -144,21 +151,49 @@ const port = 6000;
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 
 // === 核心优化配置 ===
-// 限制同时打开的页面数量，防止内存溢出。
-// 1G内存建议设为 3，2G内存建议设为 5
 const MAX_CONCURRENT_PAGES = 3; 
-let activePages = 0;
+// 空闲超时时间：60秒无连接则关闭浏览器释放内存
+const IDLE_TIMEOUT_MS = 60000; 
 
-let browser;
+let activePages = 0;
+let browser = null;
+let idleTimer = null;
+
+// === 内存管理逻辑 ===
+const updateIdleTimer = () => {
+    // 先清除旧的计时器
+    if (idleTimer) clearTimeout(idleTimer);
+
+    // 如果当前没有任何活跃页面，开始倒计时关闭 Browser
+    if (activePages === 0) {
+        idleTimer = setTimeout(async () => {
+            if (browser && activePages === 0) {
+                console.log(`[System] Idle for ${IDLE_TIMEOUT_MS/1000}s. Closing browser to free memory...`);
+                try {
+                    await browser.close();
+                } catch(e) { console.error("Close Error:", e); }
+                browser = null;
+                // 强制垃圾回收建议 (Node 默认需 flag，这里仅做引用断开)
+            }
+        }, IDLE_TIMEOUT_MS);
+    }
+};
+
 async function getBrowser() {
+    // 有新请求，立即取消空闲倒计时
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = null;
+
     if (browser && browser.isConnected()) return browser;
+
+    console.log('[System] Launching new browser instance...');
     browser = await puppeteer.launch({
         headless: 'new',
         args: [
             '--no-sandbox', '--disable-setuid-sandbox', 
             '--disable-dev-shm-usage', '--disable-gpu', 
             '--no-first-run', '--disable-extensions',
-            '--js-flags="--max-old-space-size=512"' // 限制 V8 堆内存使用
+            '--js-flags="--max-old-space-size=512"' 
         ]
     });
     return browser;
@@ -169,7 +204,6 @@ const auth = (req, res, next) => {
     const url = req.query.url || '';
     if (url.match(/localhost|127\.0\.0\.1|192\.168\.|::1/)) return res.status(403).send('Block Private IP');
     
-    // 并发熔断检查
     if (activePages >= MAX_CONCURRENT_PAGES) {
         console.warn(`[Busy] Rejecting ${url}, active: ${activePages}`);
         return res.status(503).send(`Server Busy: Too many active windows (${activePages}/${MAX_CONCURRENT_PAGES})`);
@@ -186,15 +220,15 @@ app.get('/screenshot', auth, async (req, res) => {
         const b = await getBrowser();
         page = await b.newPage();
         await page.setViewport({ width: parseInt(width)||1920, height: parseInt(height)||1080 });
-        // 缩短超时，避免卡死
         await page.goto(url.startsWith('http')?url:`http://${url}`, { waitUntil: 'networkidle2', timeout: 20000 });
         const img = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: full==='true' });
         res.set('Content-Type', 'image/jpeg');
         res.send(img);
     } catch (e) { res.status(500).send(e.message); } 
     finally { 
-        if (page) await page.close(); 
+        if (page) await page.close().catch(()=>{}).then(() => { if(global.gc) global.gc(); });
         activePages--;
+        updateIdleTimer(); // 请求结束，尝试重置空闲计时器
     }
 });
 
@@ -211,35 +245,38 @@ app.get('/live', auth, async (req, res) => {
         await page.goto(url.startsWith('http')?url:`http://${url}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
         req.on('close', () => { isClosed = true; });
         while (!isClosed && !page.isClosed()) {
-            const buf = await page.screenshot({ type: 'jpeg', quality: 75 }); // 略微降低质量提升速度
+            const buf = await page.screenshot({ type: 'jpeg', quality: 75 });
             res.write(`--frame\r\nContent-Type: image/jpeg\r\n\r\n`);
             res.write(buf);
             res.write(`\r\n`);
-            // 增加间隔到 1000ms (1秒1帧)，大幅降低多开时的 CPU 压力
             await new Promise(r => setTimeout(r, 1000)); 
         }
     } catch (e) { if (!isClosed) res.end(); } 
     finally { 
-        if (page && !page.isClosed()) await page.close(); 
+        if (page && !page.isClosed()) await page.close().catch(()=>{}); 
         activePages--;
+        updateIdleTimer(); // 直播结束，尝试重置空闲计时器
     }
 });
 
-app.listen(port, () => console.log(`Ready on ${port}`));
+app.listen(port, () => {
+    console.log(`Ready on ${port}`);
+    updateIdleTimer(); // 启动时也初始化计时器
+});
 EOF
 
     echo -e "${YELLOW}配置 PM2 进程守护...${NC}"
     npm install -g pm2
     pm2 delete "$APP_NAME" 2>/dev/null
-    # 关键优化：将内存限制提升到 1024M，防止 PM2 过早杀进程，依赖代码内部控制并发
-    pm2 start index.js --name "$APP_NAME" --max-memory-restart 1024M --log-date-format "YYYY-MM-DD HH:mm:ss"
+    # 增加 --expose-gc 参数，允许手动触发垃圾回收（可选优化）
+    pm2 start index.js --name "$APP_NAME" --node-args="--expose-gc" --max-memory-restart 1024M --log-date-format "YYYY-MM-DD HH:mm:ss"
     pm2 save
     pm2 startup | bash &>/dev/null
     
     create_shortcut
     echo -e "${GREEN}安装完成! 你的 Token: ${YELLOW}$TOKEN${NC}"
     echo -e "${GREEN}快捷键: lvs${NC}"
-    echo -e "${YELLOW}提示: 已限制最大并发数为 3，超过将提示 Server Busy 以保护服务器。${NC}"
+    echo -e "${YELLOW}内存优化策略：无连接 60秒 后自动关闭浏览器内核。${NC}"
     read -p "按回车继续..."
 }
 
@@ -304,14 +341,15 @@ show_menu() {
         get_status_info
         clear
         echo -e "${BLUE}========================================${NC}"
-        echo -e "${BLUE}   LiveShot v4.2 (稳定版) [Cmd: $SHORTCUT_NAME]${NC}"
+        echo -e "${BLUE}   LiveShot v4.3 (Auto-Idle) [Cmd: $SHORTCUT_NAME]${NC}"
         echo -e "${BLUE}========================================${NC}"
         echo -e " 状态: $STATUS_COLOR | 运行: $UPTIME_TEXT"
+        echo -e " 内存: ${YELLOW}${MEM_USAGE}${NC} (PM2 Monitor)"
         echo -e " Token: ${YELLOW}${CURRENT_TOKEN}${NC}"
         echo -e " 监控: ${BLUE}$LAST_LOG${NC}"
-        echo -e " 限制: ${YELLOW}Max 3 窗口并发 / 1fps 直播${NC}"
+        echo -e " 策略: ${YELLOW}60s 空闲自动释放内存${NC}"
         echo -e "${BLUE}----------------------------------------${NC}"
-        echo -e " 1. 安装/重装服务 (应用优化)"
+        echo -e " 1. 安装/重装服务 (应用新策略)"
         echo -e " 2. 启动服务"
         echo -e " 3. 停止服务"
         echo -e " 4. 重启服务"
