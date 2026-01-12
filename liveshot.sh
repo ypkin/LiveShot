@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# LiveShot v4.3 - 智能内存管理版 (Auto-Sleep Strategy)
-# 功能：Puppeteer 截图/直播 | 特性：空闲自动释放内存、并发限制
+# LiveShot v4.4 - 智能内存管理 + 定时重启版
+# 功能：Puppeteer 截图/直播 | 特性：空闲释放、并发限制、定时重启
 # =========================================================
 
 # --- 配置区域 ---
@@ -59,13 +59,16 @@ get_status_info() {
     UPTIME_TEXT="0s"
     LAST_LOG="无记录"
     MEM_USAGE="0MB"
+    CRON_STATUS="未设置"
     
+    # 检查 Token
     if [ -f "$CONFIG_FILE" ]; then
         CURRENT_TOKEN=$(grep -oP '(?<="token": ")[^"]*' "$CONFIG_FILE")
     else
         CURRENT_TOKEN="未安装"
     fi
 
+    # 检查 PM2 状态
     if command -v pm2 &> /dev/null; then
         if pm2 jlist 2>/dev/null | grep -q "\"name\":\"$APP_NAME\""; then
             local pm2_out=$(pm2 jlist)
@@ -92,14 +95,20 @@ get_status_info() {
             [ ! -z "$log" ] && LAST_LOG=$(echo "$log" | cut -c 1-60)
         fi
     fi
+
+    # 检查定时任务状态
+    if crontab -l 2>/dev/null | grep -q "#LiveShotAutoRestart"; then
+        CRON_STATUS="${GREEN}已开启${NC}"
+    fi
 }
 
 # 1. 安装服务
 install_service() {
-    echo -e "${BLUE}>>> 开始部署 LiveShot v4.3 (智能内存优化版)...${NC}"
+    echo -e "${BLUE}>>> 开始部署 LiveShot v4.4 (智能内存优化版)...${NC}"
     
     apt-get update -y
-    apt-get install -y --no-install-recommends curl wget gnupg2 ca-certificates lsb-release
+    # 增加 cron 安装以支持定时重启
+    apt-get install -y --no-install-recommends curl wget gnupg2 ca-certificates lsb-release cron
 
     # Swap 检查 (对于 Puppeteer 至关重要)
     PHY_MEM=$(free -m | grep Mem | awk '{print $2}')
@@ -173,7 +182,6 @@ const updateIdleTimer = () => {
                     await browser.close();
                 } catch(e) { console.error("Close Error:", e); }
                 browser = null;
-                // 强制垃圾回收建议 (Node 默认需 flag，这里仅做引用断开)
             }
         }, IDLE_TIMEOUT_MS);
     }
@@ -289,6 +297,9 @@ uninstall_service_full() {
         pm2 kill 2>/dev/null
         pm2 unstartup systemd 2>/dev/null
 
+        # 清除定时任务
+        crontab -l 2>/dev/null | grep -v "#LiveShotAutoRestart" | crontab -
+
         echo -e "${YELLOW}卸载 PM2 和全局包...${NC}"
         npm uninstall -g pm2
         rm -rf /root/.pm2 /root/.npm /usr/lib/node_modules /usr/local/lib/node_modules
@@ -333,6 +344,70 @@ reset_token() {
     read -p "按回车继续..."
 }
 
+# 定时重启设置
+set_auto_restart() {
+    echo -e "${BLUE}=========================${NC}"
+    echo -e "${BLUE}    设置定时重启策略      ${NC}"
+    echo -e "${BLUE}=========================${NC}"
+    echo -e "说明: 强制重启可清理僵尸进程和长期内存碎片"
+    echo -e "-------------------------"
+    echo " 1. 每天凌晨 04:00 (推荐)"
+    echo " 2. 每周一凌晨 04:00"
+    echo " 3. 自定义 Cron 表达式"
+    echo " 4. ${RED}关闭/删除定时重启${NC}"
+    echo " 0. 返回"
+    echo -e "-------------------------"
+    read -p "请选择: " restart_opt
+
+    PM2_PATH=$(which pm2)
+    if [ -z "$PM2_PATH" ]; then
+        echo -e "${RED}错误: 找不到 pm2，请先执行安装服务。${NC}"
+        read -p "按回车返回..."
+        return
+    fi
+
+    # 构造重启命令 (带有特定标记以便后续管理)
+    RESTART_CMD="$PM2_PATH restart $APP_NAME --update-env >/dev/null 2>&1 #LiveShotAutoRestart"
+
+    case $restart_opt in
+        1)
+            CRON_EXP="0 4 * * *"
+            ;;
+        2)
+            CRON_EXP="0 4 * * 1"
+            ;;
+        3)
+            echo -e "${YELLOW}请输入 Cron 表达式 (例如 '0 3 * * *' 表示每天3点):${NC}"
+            read -p "> " CRON_EXP
+            if [ -z "$CRON_EXP" ]; then echo "输入为空"; return; fi
+            ;;
+        4)
+            crontab -l 2>/dev/null | grep -v "#LiveShotAutoRestart" | crontab -
+            echo -e "${GREEN}✅ 已关闭定时重启。${NC}"
+            read -p "按回车继续..."
+            return
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo "无效选项"
+            return
+            ;;
+    esac
+
+    # 写入 Crontab
+    # 1. 导出当前 crontab
+    # 2. 过滤掉旧的 LiveShotAutoRestart 任务
+    # 3. 追加新任务
+    # 4. 重新导入
+    (crontab -l 2>/dev/null | grep -v "#LiveShotAutoRestart"; echo "$CRON_EXP $RESTART_CMD") | crontab -
+    
+    echo -e "${GREEN}✅ 设置成功！${NC}"
+    echo -e "任务内容: ${YELLOW}$CRON_EXP $PM2_PATH restart $APP_NAME${NC}"
+    read -p "按回车继续..."
+}
+
 # 主菜单
 show_menu() {
     check_root
@@ -341,21 +416,22 @@ show_menu() {
         get_status_info
         clear
         echo -e "${BLUE}========================================${NC}"
-        echo -e "${BLUE}   LiveShot v4.3 (Auto-Idle) [Cmd: $SHORTCUT_NAME]${NC}"
+        echo -e "${BLUE}   LiveShot v4.4 (Auto-Idle) [Cmd: $SHORTCUT_NAME]${NC}"
         echo -e "${BLUE}========================================${NC}"
         echo -e " 状态: $STATUS_COLOR | 运行: $UPTIME_TEXT"
         echo -e " 内存: ${YELLOW}${MEM_USAGE}${NC} (PM2 Monitor)"
         echo -e " Token: ${YELLOW}${CURRENT_TOKEN}${NC}"
         echo -e " 监控: ${BLUE}$LAST_LOG${NC}"
-        echo -e " 策略: ${YELLOW}60s 空闲自动释放内存${NC}"
+        echo -e " 策略: ${YELLOW}60s 空闲释放${NC} | 定时: $CRON_STATUS"
         echo -e "${BLUE}----------------------------------------${NC}"
-        echo -e " 1. 安装/重装服务 (应用新策略)"
+        echo -e " 1. 安装/重装服务"
         echo -e " 2. 启动服务"
         echo -e " 3. 停止服务"
-        echo -e " 4. 重启服务"
+        echo -e " 4. 重启服务 (立即)"
         echo -e " 5. 查看日志"
         echo -e " 6. 修改/重置 Token"
-        echo -e "${RED} 7. 彻底卸载 (含 Node/PM2/依赖)${NC}"
+        echo -e " 7. 彻底卸载"
+        echo -e "${GREEN} 8. 设置定时重启任务${NC}"
         echo -e " 0. 退出"
         echo -e ""
         read -p " 选择: " op
@@ -367,6 +443,7 @@ show_menu() {
             5) view_logs ;;
             6) reset_token ;;
             7) uninstall_service_full ;;
+            8) set_auto_restart ;;
             0) exit 0 ;;
             *) ;;
         esac
