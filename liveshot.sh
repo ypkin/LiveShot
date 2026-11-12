@@ -1,9 +1,11 @@
 #!/bin/bash
 
 # =========================================================
-# LiveShot v4.25 - 优化版
+# LiveShot v4.27 - 优化版
 # 功能：Puppeteer 截图/直播 | 特性：空闲释放、并发限制、定时重启
 # 更新日志（新→旧）：
+#  v4.27 /gh-live 连续观看超 2 分钟自动断开（省流量）：120 秒后主动结束直播流，观众刷新可再看
+#  v4.26 制片方每 6 小时重载时换主题：重载改为整页重建（openPanelPage 抽新主题），不再是 goto
 #  v4.25 地图下方时间标签字号加大到 36px
 #  v4.24 直播帧率改正常：截图间隔 4 秒→2 秒（跟面板数据推送节奏一致），地图重绘节流同步到 2 秒
 #  v4.23 地图下方时间标签字号加大到 28px
@@ -168,7 +170,7 @@ get_status_info() {
 
 # 1. 安装服务
 install_service() {
-  echo -e "${BLUE}>>> 开始部署 LiveShot v4.25 (优化版)...${NC}"
+  echo -e "${BLUE}>>> 开始部署 LiveShot v4.27 (优化版)...${NC}"
 
   # ---- 系统依赖（Debian/Ubuntu 用 apt，Alpine 用 apk）----
   if is_alpine; then
@@ -582,11 +584,11 @@ async function getLiveProducer(target) {
       await new Promise((r) => setTimeout(r, 1000)); // 等在途截图完成，别截到重载中的半成品
       try {
         console.log(`[Live] reloading page to prevent memory leak: ${target}`);
-        await p.page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await p.page.waitForSelector('tbody tr', { timeout: 3000 }).catch(() => {});
-        await p.page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important}' }).catch(() => {});
-        await p.page.evaluate(() => { window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 2000); }).catch(() => {});
-        await injectTimeLabel(p.page); // 重载后时间标签丢了，重新注入
+        // 整页重建（不用 goto）：openPanelPage 内部抽新主题、重新播种、冻结动画、注入时间标签
+        const newPage = await openPanelPage(target, 1280, 1240);
+        const oldPage = p.page;
+        p.page = newPage;
+        if (oldPage && !oldPage.isClosed()) await oldPage.close().catch(() => {});
         if (global.gc) global.gc();
         console.log(`[Live] page reloaded: ${target}`);
       } catch (e) {
@@ -674,6 +676,10 @@ app.get('/gh-live', auth, async (req, res) => {
   // 订阅共享帧：不用自己开页，立刻拿到最新一帧
   res.writeHead(200, { 'Content-Type': 'multipart/x-mixed-replace; boundary=frame', 'Cache-Control': 'no-store' });
   p.clients.add(res);
+  // 连续观看超 2 分钟断开（省流量）：120 秒后主动结束本次直播流，观众刷新可再看
+  const liveTimer = setTimeout(() => {
+    try { if (!res.writableEnded) res.end(); } catch {}
+  }, 120000);
   // 新观众先发一帧：有直播帧直接发直播帧；没有就发缓冲动画（每次都加），不再发缓存的静态图
   if (p.latest) {
     try {
@@ -691,6 +697,7 @@ app.get('/gh-live', auth, async (req, res) => {
   }
   console.log(`[Live] ${url} (viewers: ${p.clients.size}, pages: ${activePages})`);
   req.on('close', () => {
+    clearTimeout(liveTimer);
     p.clients.delete(res);
     // 没人看了就关页（常驻制片方除外，它一直开着）：下次有人来就新开一页、随机换个颜色，刷新必换色
     if (p.clients.size === 0 && target !== PERMANENT_TARGET) stopLiveProducer(target);
@@ -875,7 +882,7 @@ show_menu() {
     get_status_info
     clear
     echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE} LiveShot v4.25 (Auto-Idle) [Cmd: $SHORTCUT_NAME]${NC}"
+    echo -e "${BLUE} LiveShot v4.27 (Auto-Idle) [Cmd: $SHORTCUT_NAME]${NC}"
     echo -e "${BLUE}========================================${NC}"
     echo -e " 状态: $STATUS_COLOR | 运行: $UPTIME_TEXT"
     echo -e " 内存: ${YELLOW}${MEM_USAGE}${NC} (PM2 Monitor)"
